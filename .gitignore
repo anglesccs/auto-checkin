@@ -1,0 +1,30 @@
+# ---------- 运行时数据（含账号凭据，绝不能提交）----------
+data/
+extracted_accounts.yaml
+*.log
+.env
+
+# ---------- 运维脚本的本地配置（含你的 NAS 地址 / SSH 用户名）----------
+# 首次运行脚本会自动生成；想手写就先复制同名 .example 文件
+NAS运维工具/部署代码到NAS/deploy.conf
+NAS运维工具/同步登录信息到NAS/sync.conf
+
+# ---------- 部署工具里的源码副本（由项目根目录自动解析，无需入库）----------
+NAS运维工具/部署代码到NAS/src_snapshot/
+
+# ---------- 临时 / 工作区 ----------
+.workbuddy/
+_t/
+*.tgz
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---------- 编辑器与系统 ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

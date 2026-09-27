@@ -1,0 +1,57 @@
+==============================================================
+ NAS 运维工具 —— 放置位置与独立运行说明
+==============================================================
+
+一、推荐位置（默认用法）
+  把整个「NAS运维工具」文件夹放在项目根目录下，即:
+
+    自动签到\
+    ├─ checkin\
+    ├─ static\
+    ├─ Dockerfile
+    └─ NAS运维工具\          <- 放这里
+        ├─ 工具放置位置说明.txt  （本文件）
+        ├─ 使用说明.md
+        ├─ 部署代码到NAS\
+        │   └─ 部署代码到NAS.bat
+        └─ 同步登录信息到NAS\
+            ├─ 同步登录信息到NAS.bat
+            ├─ install-deps.bat
+            ├─ sync_credentials.py
+            └─ extract_credentials.py
+
+  放在项目内时，两个工具都能自动找到要用的代码，
+  直接双击各自的 .bat 即可。
+
+二、单独使用「同步登录信息到NAS」
+  这个文件夹自带全部所需文件（1 个 bat + 2 个 py），可以拷到
+  任意位置独立运行。前提:
+    1. 本机装了 Python 3.9+（首次先双击 install-deps.bat 装依赖）
+    2. 运行时 WorkBuddy 客户端保持登录且正在运行
+
+三、单独使用「部署代码到NAS」
+  脚本按以下顺序自动找要部署的代码:
+    1. deploy.conf 里 SRC_OVERRIDE= 指定的目录
+    2. 从本文件夹逐级向上最多 6 层，找同时含
+       checkin\web.py 和 Dockerfile 的目录
+    3. 本文件夹下的 src_snapshot\（整包移植用的源码副本）
+  因此:
+    - 放在项目内: 什么都不用改，永远部署最新代码
+    - 拷到项目外（U 盘 / 其他电脑）二选一:
+        方式 A: 把项目里的 checkin、static、Dockerfile、
+                docker-compose.yml、requirements.txt、.dockerignore
+                拷进 src_snapshot\ 覆盖旧副本
+        方式 B: 在 deploy.conf 里写
+                SRC_OVERRIDE=项目根目录的完整路径
+  运行前脚本会打印实际使用的源码目录（「代码来源: ...」），
+  上传前注意核对一眼。
+
+四、运行环境要求
+    - Windows 10 1803 及以上（自带 ssh / scp / tar）
+    - 「同步登录信息到NAS」另需: Python 3.9+ 与
+      requests / PyYAML / pycryptodome（install-deps.bat 一键装好）
+    - 密码一律不落盘；deploy.conf / sync.conf 只记住地址等
+      非敏感配置，首次运行自动生成
+
+五、详细用法
+    见本文件夹「使用说明.md」以及两个子文件夹各自的「使用说明.md」。

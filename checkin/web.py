@@ -1,0 +1,619 @@
+"""Web 控制台（FastAPI）：账户管理、网页登录导入、状态/历史查看、手动签到"""
+
+import hashlib
+import hmac
+import json
+import logging
+import os
+import secrets
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+
+from . import runner, traeweb
+from .platforms import PLATFORMS
+from .scheduler import Scheduler
+from .store import HISTORY_MAX_AGE_DAYS, Store, StoreError
+
+logger = logging.getLogger("checkin")
+
+STATIC_DIR = Path(__file__).parent.parent / "static"
+SESSION_COOKIE = "ck_session"
+
+
+def _session_token(password: str) -> str:
+    return hashlib.sha256(f"auto-checkin::{password}".encode()).hexdigest()
+
+
+def parse_expires(value) -> float | None:
+    """expires_at（毫秒时间戳 / ISO 字符串）→ epoch 秒；无法解析返回 None"""
+    if value in (None, "", 0):
+        return None
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    # 13 位是毫秒，10 位是秒
+    return ts / 1000.0 if ts > 1e11 else ts
+
+
+# 账户列表展示顺序：按平台归类（已知平台按此处顺序，未知平台按平台名排在最后）
+PLATFORM_ORDER = {"trae": 0, "workbuddy": 1}
+
+
+def account_sort_key(acc: dict) -> tuple:
+    """账户列表排序键：平台 → 同平台内按昵称 / UID / 名称
+
+    同平台内换电脑、重启容器都不会打乱顺序，界面每次刷新都一致。
+    """
+    platform = str(acc.get("platform") or "").strip().lower()
+    identity = str(
+        acc.get("username") or acc.get("nickname")
+        or acc.get("user_id") or acc.get("uid") or acc.get("name") or ""
+    )
+    return (PLATFORM_ORDER.get(platform, 99), platform, identity.casefold())
+
+
+def _fmt_ts(ts: float, tz_name: str) -> str:
+    try:
+        tz = ZoneInfo(tz_name)
+        dt = datetime.fromtimestamp(ts, tz)
+    except Exception:
+        # 缺 tzdata 时退回系统本地时区（容器已设 TZ=Asia/Shanghai），别退到 UTC 误导用户
+        dt = datetime.fromtimestamp(ts)
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def expires_view(acc: dict, tz_name: str = "Asia/Shanghai") -> dict:
+    """凭据有效期视图：给控制台显示「什么时候到期 / 是否已过期」"""
+    raw = acc.get("expires_at")
+    ts = parse_expires(raw)
+    auth_type = acc.get("auth_type") or ("web" if acc.get("cookie") else "client")
+    # TRAE 客户端凭据带 refresh_token，accessToken 过期可自动续期，不算硬失效
+    auto_renew = bool(
+        acc.get("platform") == "trae" and auth_type != "web" and acc.get("refresh_token")
+    )
+    info = {
+        "expires_at": raw,
+        "expires_ts": ts,
+        "expires_label": "",
+        "expires_in_days": None,
+        "expired": False,
+        "has_expiry": ts is not None,
+        "auto_renew": auto_renew,
+        # 网页 Cookie 会话没有明确有效期，界面单独提示
+        "session_only": ts is None and auth_type == "web",
+    }
+    if ts is None:
+        return info
+    now = time.time()
+    info["expired"] = ts <= now
+    info["expires_in_days"] = int((ts - now) // 86400)
+    info["expires_label"] = _fmt_ts(ts, tz_name)
+    return info
+
+
+def _claimed(rec: dict) -> bool:
+    """这条历史记录是否**真的领取到了积分**
+
+    新记录带 claimed 字段；旧记录没有该字段时按说明文字推断
+    （「今日已签到」属幂等命中，没有新增积分）。
+    """
+    if "claimed" in rec:
+        return bool(rec.get("claimed"))
+    if not rec.get("ok"):
+        return False
+    return "已签到" not in str(rec.get("message") or "")
+
+
+def build_group_resolver(accounts: list):
+    """构建「历史记录 → 用户分组键」的解析器
+
+    老记录没有 user_key（用账户名兜底），新记录用 uid / user_id。这里以当前账户配置为准
+    建立「名称 / uid → 用户分组」映射，保证同一用户的历史不会被拆成两组。
+
+    返回 (group_of, nick_map)：
+    - group_of(record) -> 分组键（形如 "trae|user_id"）
+    - nick_map：分组键 -> 昵称
+
+    `/api/history` 与 `/api/history/reset` 共用本函数，保证两边算出的分组键完全一致。
+    """
+    canonical: dict = {}
+    nick_map: dict = {}
+    prefixes: list = []
+    for acc in accounts:
+        plat = str(acc.get("platform") or "")
+        identity = str(acc.get("uid") or acc.get("user_id") or acc.get("name") or "")
+        gk = f"{plat}|{identity}"
+        acc_name = str(acc.get("name") or "")
+        canonical[(plat, acc_name)] = gk
+        for value in (acc.get("uid"), acc.get("user_id")):
+            if value:
+                canonical[(plat, str(value))] = gk
+        # 被合并掉的旧账户名（如 "Trae CN" 吞掉 "TRAE SOLO CN"）也映射到同一分组，
+        # 否则旧名字写下的历史会变成一个幽灵用户
+        for alias in (acc.get("aliases") or []):
+            alias = str(alias or "")
+            if alias:
+                canonical[(plat, alias)] = gk
+        nick = str(acc.get("username") or acc.get("nickname") or "").strip()
+        if nick:
+            nick_map[gk] = nick
+        if acc_name:
+            prefixes.append((plat, acc_name, gk))
+    # 早期导入的 WorkBuddy 账户名形如 "<原名称>.<时间戳>.<pid>.<guid>"，
+    # 这类历史记录靠前缀回落到同一用户（长名字优先，避免误合并）
+    prefixes.sort(key=lambda x: len(x[1]), reverse=True)
+
+    def group_of(rec: dict) -> str:
+        plat = str(rec.get("platform") or "")
+        user_key = str(rec.get("user_key") or "")
+        name_rec = str(rec.get("name") or "")
+        gk = canonical.get((plat, user_key)) or canonical.get((plat, name_rec))
+        if gk:
+            return gk
+        for p2, prefix, g in prefixes:
+            if p2 == plat and name_rec.startswith(prefix + "."):
+                return g
+        return f"{plat}|{user_key or name_rec}"
+
+    return group_of, nick_map
+
+
+def create_app(store: Store, sched: Scheduler | None = None) -> FastAPI:
+    web_password = os.environ.get("WEB_PASSWORD", "").strip()
+    app = FastAPI(title="自动签到控制台", docs_url=None, redoc_url=None)
+
+    # 启动时合并重复账户（同一平台同一 uid 被导入多次）
+    try:
+        merged = store.dedupe_accounts()
+        if merged.get("removed"):
+            logger.info(f"启动清理：已合并 {merged['removed']} 个重复账户，现有 {merged['total']} 个")
+    except Exception as e:
+        logger.warning(f"合并重复账户失败：{e}")
+
+    # ---------- 登录鉴权 ----------
+
+    def check_auth(request: Request) -> None:
+        if not web_password:
+            return
+        cookie = request.cookies.get(SESSION_COOKIE, "")
+        if not hmac.compare_digest(cookie, _session_token(web_password)):
+            raise HTTPException(401, "未登录或会话已失效")
+
+    @app.post("/api/login")
+    def login(body: dict):
+        password = str(body.get("password") or "")
+        if not web_password:
+            return {"ok": True, "message": "未设置 WEB_PASSWORD，无需登录"}
+        if hmac.compare_digest(password, web_password):
+            resp = JSONResponse({"ok": True})
+            resp.set_cookie(SESSION_COOKIE, _session_token(web_password),
+                            httponly=True, samesite="lax", max_age=30 * 86400)
+            return resp
+        raise HTTPException(403, "密码错误")
+
+    @app.post("/api/logout")
+    def logout():
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(SESSION_COOKIE)
+        return resp
+
+    # ---------- 总览 ----------
+
+    def _account_view(acc: dict, tz_name: str = "Asia/Shanghai") -> dict:
+        view = {
+            "name": acc.get("name"),
+            "platform": acc.get("platform"),
+            "auth_type": acc.get("auth_type") or ("web" if acc.get("cookie") else "client"),
+            "username": acc.get("username") or acc.get("nickname") or "",
+            "user_id": str(acc.get("user_id") or acc.get("uid") or ""),
+            "region": acc.get("region") or "",
+            "expires_at": acc.get("expires_at"),
+            "has_secret": bool(acc.get("cookie") or acc.get("token")),
+        }
+        # 前端统一用 nickname 字段展示「用户」列
+        view["nickname"] = view["username"]
+        # 凭据有效期（是否过期 / 剩余天数 / 是否可自动续期）
+        view.update(expires_view(acc, tz_name))
+        return view
+
+    @app.get("/api/state")
+    def state(request: Request):
+        check_auth(request)
+        accounts = store.accounts()
+        settings = store.settings()
+        tz_name = settings.get("timezone") or "Asia/Shanghai"
+        today = runner_now_date()
+        history = store.read_history(days=1)
+        # 账户列表按平台归类排序（TRAE 一组、WorkBuddy 一组）
+        views = [_account_view(a, tz_name) for a in sorted(accounts, key=account_sort_key)]
+        return {
+            "web_auth_enabled": bool(web_password),
+            "settings": settings,
+            "next_run": sched.next_run_iso() if sched else None,
+            "accounts": views,
+            "today_results": [r for r in history if r.get("date") == today],
+        }
+
+    # ---------- 手动签到 / 状态查询 ----------
+
+    @app.post("/api/checkin")
+    def checkin(body: dict, request: Request):
+        check_auth(request)
+        name = body.get("name")
+        accounts = store.accounts()
+        if not accounts:
+            raise HTTPException(400, "还没有配置任何账户")
+        if not runner.run_lock.acquire(blocking=False):
+            raise HTTPException(409, "有签到任务正在执行，请稍后再试")
+        try:
+            if name:
+                acc = next((a for a in accounts if a.get("name") == name), None)
+                if acc is None:
+                    raise HTTPException(404, f"账户不存在：{name}")
+                result = runner.run_account(acc, store=store)
+                return {"ok": result.ok, "message": result.message, "credits": result.credits}
+            results = runner.run_all(accounts, store=store)
+            return {"ok": all(r.ok for _, r in results),
+                    "total": len(results),
+                    "failed": sum(1 for _, r in results if not r.ok)}
+        finally:
+            runner.run_lock.release()
+
+    @app.post("/api/accounts/{name}/status")
+    def account_status(name: str, request: Request):
+        check_auth(request)
+        acc = store.get_account(name)
+        if acc is None:
+            raise HTTPException(404, f"账户不存在：{name}")
+        return runner.query_status(acc, store=store)
+
+    # ---------- 添加账户：TRAE 网页登录 ----------
+
+    @app.post("/api/accounts/trae_web")
+    def add_trae_web(body: dict, request: Request):
+        check_auth(request)
+        name = str(body.get("name") or "").strip()
+        cookie = str(body.get("cookie") or "").strip()
+        if not cookie:
+            raise HTTPException(400, "Cookie 不能为空")
+        if len(cookie) < 50:
+            raise HTTPException(400, "Cookie 内容过短，请复制完整的 Cookie 字符串")
+
+        base = traeweb.DEFAULT_WEB_BASE
+        try:
+            login_info = traeweb.check_login(cookie, base)
+            if login_info.get("website_host"):
+                base = login_info["website_host"]
+                login_info = traeweb.check_login(cookie, base)
+            user = traeweb.get_user_info(cookie, base)
+        except traeweb.WebAuthError as e:
+            raise HTTPException(400, str(e))
+
+        acc = {
+            "name": name or None,
+            "platform": "trae",
+            "auth_type": "web",
+            "cookie": cookie,
+            "web_base": base,
+            "ai_pay_host": login_info.get("ai_pay_host"),
+            "user_id": user.get("user_id") or login_info.get("user_id"),
+            "username": user.get("username"),
+            "region": login_info.get("region") or user.get("region"),
+            "req_source": 3,
+        }
+        try:
+            acc = store.upsert_account(acc)
+        except StoreError as e:
+            raise HTTPException(400, str(e))
+        status = runner.query_status(acc, store=store)
+        return {"ok": True, "account": _account_view(acc), "status": status,
+                "message": f"登录成功：{acc.get('username') or acc.get('user_id')}"}
+
+    # ---------- 添加账户：TRAE 客户端凭据 ----------
+
+    @app.post("/api/accounts/trae_client")
+    def add_trae_client(body: dict, request: Request):
+        check_auth(request)
+        acc = {
+            "name": str(body.get("name") or "").strip() or None,
+            "platform": "trae",
+            "auth_type": "client",
+            "token": str(body.get("token") or "").strip(),
+            "refresh_token": str(body.get("refresh_token") or "").strip(),
+            "expires_at": body.get("expires_at") or "",
+            "user_id": str(body.get("user_id") or "").strip(),
+            "host": str(body.get("host") or "https://api.trae.cn").strip(),
+            "device_id": str(body.get("device_id") or "").strip(),
+            "machine_id": str(body.get("machine_id") or "").strip(),
+            "ide_version": str(body.get("ide_version") or "").strip(),
+            "username": str(body.get("username") or body.get("nickname") or "").strip(),
+        }
+        if not acc["token"]:
+            raise HTTPException(400, "token 不能为空")
+        try:
+            acc = store.upsert_account(acc)
+        except StoreError as e:
+            raise HTTPException(400, str(e))
+        status = runner.query_status(acc, store=store)
+        return {"ok": True, "account": _account_view(acc), "status": status}
+
+    # ---------- 添加账户：WorkBuddy ----------
+
+    @app.post("/api/accounts/workbuddy")
+    def add_workbuddy(body: dict, request: Request):
+        check_auth(request)
+        raw = str(body.get("raw") or "").strip()
+        token = str(body.get("token") or "").strip()
+        uid = str(body.get("uid") or "").strip()
+        domain = str(body.get("domain") or "").strip()
+        expires_at = body.get("expires_at")
+        nickname = ""
+
+        if raw:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise HTTPException(400, f"粘贴的内容不是合法 JSON：{e}")
+            auth = data.get("auth") if isinstance(data, dict) else None
+            auth = auth if isinstance(auth, dict) else {}
+            account_obj = data.get("account") if isinstance(data, dict) else None
+            account_obj = account_obj if isinstance(account_obj, dict) else {}
+            token = str(auth.get("accessToken") or token)
+            uid = str(account_obj.get("uid") or auth.get("uid") or uid)
+            domain = str(auth.get("domain") or domain)
+            expires_at = auth.get("expiresAt", expires_at)
+            if "$wbEncrypted" in str(auth.get("accessToken") or ""):
+                raise HTTPException(
+                    400,
+                    "该 .info 的 accessToken 是加密存储的（新版客户端），无法通过复制粘贴导入。"
+                    "请改用「NAS运维工具\\同步登录信息到NAS\\同步登录信息到NAS.bat」（会自动用客户端内存密钥解密），"
+                    "或打开旧版本客户端凭据文件复制明文内容",
+                )
+            # .info 里的昵称可能是明文，也可能是 {$wbEncrypted}（新版客户端）；
+            # 加密时交给状态接口回填，这里只取明文
+            local_nick = account_obj.get("nickname")
+            if isinstance(local_nick, str) and local_nick.strip():
+                nickname = local_nick.strip()
+
+        if not token or not uid:
+            raise HTTPException(400, "缺少 accessToken 或 uid")
+        acc = {
+            "name": str(body.get("name") or "").strip() or None,
+            "platform": "workbuddy",
+            "token": token,
+            "uid": uid,
+            "domain": domain,
+            "expires_at": expires_at,
+            "username": str(body.get("username") or body.get("nickname") or nickname or "").strip(),
+        }
+        try:
+            acc = store.upsert_account(acc)
+        except StoreError as e:
+            raise HTTPException(400, str(e))
+        status = runner.query_status(acc, store=store)
+        return {"ok": True, "account": _account_view(acc), "status": status}
+
+    # ---------- 删除账户 ----------
+
+    @app.delete("/api/accounts/{name}")
+    def delete_account(name: str, request: Request):
+        check_auth(request)
+        if not store.delete_account(name):
+            raise HTTPException(404, f"账户不存在：{name}")
+        return {"ok": True}
+
+    # ---------- 历史 / 设置 ----------
+
+    @app.get("/api/history")
+    def history(days: int = 14, start: str = "", end: str = "", name: str = "",
+                platform: str = "", keyword: str = "", result: str = "",
+                request: Request = None):
+        """签到历史查询（按用户聚合 + 修正后的积分核算）
+
+        - days：最近 N 天（未指定 start/end 时生效）
+        - start / end：日期区间（YYYY-MM-DD，含端点，优先级高于 days）
+        - name / platform：账户名 / 平台过滤
+        - result：ok / fail（全部留空）
+        - keyword：说明内容模糊匹配
+
+        返回：
+        - records：明细（按时间倒序），每条带 claimed（本次是否真的领到积分）
+        - users：按用户聚合（签到天数 / 成功失败 / 获得积分 / 最近结果）
+        - summary：整体统计，credits 只统计真正领取到的积分，
+          且同一用户同一天最多算一次（避免「今日已签到」被重复累加）
+        """
+        if request is not None:
+            check_auth(request)
+
+        if start or end:
+            records = store.read_history(days=HISTORY_MAX_AGE_DAYS)
+        else:
+            records = store.read_history(days=max(1, min(days, HISTORY_MAX_AGE_DAYS)))
+
+        start = (start or "").strip()
+        end = (end or "").strip()
+        name = (name or "").strip()
+        platform = (platform or "").strip().lower()
+        result = (result or "").strip().lower()
+        keyword = (keyword or "").strip().lower()
+
+        def keep(r: dict) -> bool:
+            date = str(r.get("date") or "")
+            if start and date < start:
+                return False
+            if end and date > end:
+                return False
+            if name and str(r.get("name") or "") != name:
+                return False
+            if platform and str(r.get("platform") or "").lower() != platform:
+                return False
+            if result == "ok" and not r.get("ok"):
+                return False
+            if result == "fail" and r.get("ok"):
+                return False
+            if keyword and keyword not in str(r.get("message") or "").lower():
+                return False
+            return True
+
+        records = [r for r in records if keep(r)]
+        records.sort(key=lambda r: float(r.get("ts") or 0), reverse=True)
+
+        # 用户归并：以当前账户配置为准建立「名称 / uid → 用户分组」映射
+        group_of, nick_map = build_group_resolver(store.accounts())
+
+        rows = []
+        for r in records:
+            gk = group_of(r)
+            r["claimed"] = _claimed(r)
+            # group：用户分组键，前端据此把明细挂到对应用户下
+            r["group"] = gk
+            rows.append((gk, r))
+
+        groups: dict = {}
+        for gk, r in rows:
+            g = groups.get(gk)
+            if g is None:
+                g = groups[gk] = {
+                    "key": gk,
+                    "name": r.get("name") or "",
+                    "platform": r.get("platform") or "",
+                    "nickname": nick_map.get(gk)
+                                  or str(r.get("username") or "").strip(),
+                    "total": 0, "ok": 0, "failed": 0,
+                    "ok_dates": set(), "credit_dates": set(),
+                    "first_date": "", "last_ts": 0.0,
+                    "last_date": "", "last_time": "",
+                    "last_ok": None, "last_message": "",
+                }
+            g["total"] += 1
+            date = str(r.get("date") or "")
+            if r.get("ok"):
+                g["ok"] += 1
+                g["ok_dates"].add(date)
+            else:
+                g["failed"] += 1
+            if r["claimed"] and isinstance(r.get("credits"), (int, float)):
+                g["credit_dates"].add(date)
+            if not g["first_date"] or date < g["first_date"]:
+                g["first_date"] = date
+            ts = float(r.get("ts") or 0)
+            if ts >= g["last_ts"]:
+                g["last_ts"] = ts
+                g["last_date"] = date
+                g["last_time"] = str(r.get("time") or "")
+                g["last_ok"] = bool(r.get("ok"))
+                g["last_message"] = str(r.get("message") or "")
+
+        # 累计获得积分：按「用户 + 日期」去重，一天只算一次，且只算真正领取到积分的记录
+        earned: dict = {}
+        for gk, r in rows:
+            if not r["claimed"]:
+                continue
+            credits = r.get("credits")
+            if not isinstance(credits, (int, float)):
+                continue
+            key_earn = (gk, str(r.get("date") or ""))
+            earned[key_earn] = max(earned.get(key_earn, 0.0), float(credits))
+
+        users = []
+        for gk, g in groups.items():
+            g_credits = sum(earned.get((gk, d), 0.0) for d in g["credit_dates"])
+            users.append({
+                "key": gk,
+                "name": g["name"],
+                "platform": g["platform"],
+                "nickname": g["nickname"],
+                "total": g["total"],
+                "ok": g["ok"],
+                "failed": g["failed"],
+                "days": len(g["ok_dates"]),
+                "credit_days": len(g["credit_dates"]),
+                "credits": int(g_credits) if abs(g_credits - round(g_credits)) < 1e-6
+                           else round(g_credits, 2),
+                "first_date": g["first_date"],
+                "last_date": g["last_date"],
+                "last_time": g["last_time"],
+                "last_ts": g["last_ts"],
+                "last_ok": g["last_ok"],
+                "last_message": g["last_message"],
+            })
+        users.sort(key=lambda u: (float(u.get("last_ts") or 0), u.get("total") or 0), reverse=True)
+
+        credits_total = sum(earned.values())
+        ok_count = sum(1 for r in records if r.get("ok"))
+        return {
+            "records": records,
+            "users": users,
+            "summary": {
+                "total": len(records),
+                "ok": ok_count,
+                "failed": len(records) - ok_count,
+                "credits": int(credits_total) if abs(credits_total - round(credits_total)) < 1e-6
+                           else round(credits_total, 2),
+                "days": len({str(r.get("date") or "") for r in records if r.get("ok")}),
+                "claimed_days": len({str(r.get("date") or "") for r in records if r.get("claimed")}),
+                "users": len(users),
+            },
+        }
+
+    @app.post("/api/history/reset")
+    def reset_history(body: dict, request: Request):
+        """重置某个用户的签到历史（删除该用户的全部记录）
+
+        body: {"group": "<用户分组键，取自 /api/history 的 users[].key>"}
+
+        只删历史，不动账户与凭据；删除范围是该用户的**全部**历史，
+        与前端当前的日期筛选区间无关。
+        """
+        check_auth(request)
+        group = str(body.get("group") or "").strip()
+        if not group:
+            raise HTTPException(400, "缺少 group（用户分组键）")
+        group_of, _ = build_group_resolver(store.accounts())
+        removed = store.delete_history_where(lambda r: group_of(r) == group)
+        logger.info(f"重置签到历史：group={group}，已删除 {removed} 条记录")
+        return {"ok": True, "group": group, "removed": removed}
+
+    @app.post("/api/settings")
+    def update_settings(body: dict, request: Request):
+        check_auth(request)
+        try:
+            settings = store.update_settings(
+                schedule=body.get("schedule"),
+                timezone=body.get("timezone"),
+                run_on_start=body.get("run_on_start"),
+            )
+        except StoreError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "settings": settings}
+
+    # ---------- 页面 ----------
+
+    @app.get("/")
+    def index():
+        return Response(
+            (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+            media_type="text/html",
+        )
+
+    return app
+
+
+def runner_now_date() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")

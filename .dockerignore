@@ -1,0 +1,7 @@
+data/
+.git/
+__pycache__/
+*.pyc
+*.log
+extracted_accounts.yaml
+README.md

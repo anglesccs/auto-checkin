@@ -1,0 +1,19 @@
+# 部署脚本的本地配置示例。复制成 deploy.conf 使用
+# （部署脚本首次运行会自己生成 deploy.conf，此文件仅作参考）
+#
+# 密码不会写入本文件：选「密码登录」时是当场输入。
+
+# 跑服务的那台机器的地址（必填）
+NAS_IP=192.168.x.x
+# SSH 端口
+NAS_PORT=22
+# SSH 用户名（必填）
+NAS_USER=user
+# 1 = SSH 密钥免密登录；2 = SSH 密码
+AUTH_MODE=1
+# NAS 上的项目目录
+RDIR=/vol2/1000/docker/auto-checkin
+# 控制台端口（只用于打印访问地址）
+WEB_PORT=8080
+# 源码目录（留空则自动向上查找项目根目录，其次用本目录的 src_snapshot）
+SRC_OVERRIDE=

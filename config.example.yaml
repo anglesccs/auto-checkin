@@ -1,0 +1,41 @@
+# 此文件仅为初始参考模板。v2 起 Web 控制台会自动维护 data/config.yaml，
+# 无需手动编辑：启动容器后在 Web 界面添加账户即可。
+#
+# data/config.yaml 结构（由 Web 控制台自动生成与更新）：
+#
+# schedule: "08:30"            # 每天签到时间
+# timezone: "Asia/Shanghai"    # 时区
+# run_on_start: true           # 启动时立即执行一轮
+#
+# accounts:
+#   # TRAE 网页登录模式（Web 界面粘贴 Cookie 导入，自动换取 token）
+#   - name: trae-1
+#     platform: trae
+#     auth_type: web
+#     cookie: "ttwid=...; sessionid=..."
+#     web_base: "https://www.trae.cn"
+#     ai_pay_host: "https://api.trae.cn"
+#     user_id: "12345678"
+#     username: "某用户"
+#     region: "CN"
+#     req_source: 3
+#
+#   # TRAE 客户端模式（tools/extract_credentials.py 导出，refresh_token 可长期续期）
+#   - name: trae-2
+#     platform: trae
+#     auth_type: client
+#     token: "..."
+#     refresh_token: "..."
+#     expires_at: "2026-10-01T08:00:00Z"
+#     user_id: "12345678"
+#     device_id: "..."
+#     machine_id: "..."
+#     req_source: 1
+#
+#   # WorkBuddy（Web 界面粘贴 .info 文件内容导入；token 过期需重新导入）
+#   - name: workbuddy-1
+#     platform: workbuddy
+#     token: "accessToken"
+#     uid: "用户 uid"
+#     domain: ""
+#     expires_at: 1758000000000

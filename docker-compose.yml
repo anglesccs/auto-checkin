@@ -1,0 +1,14 @@
+services:
+  auto-checkin:
+    build: .
+    image: auto-checkin:latest
+    container_name: auto-checkin
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Asia/Shanghai
+      # Web 控制台访问密码（建议设置；留空则无鉴权，仅限内网使用）
+      # WEB_PASSWORD: "your-password"
+    volumes:
+      - ./data:/app/data
