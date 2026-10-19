@@ -1,9 +1,9 @@
-# 自动签到（TRAE / WorkBuddy / Qoder）
+# 自动签到（TRAE / WorkBuddy / Qoder / CodeArts）
 
-带 **Web 控制台** 的 TRAE（Trae CN / TRAE SOLO CN / 网页版）、WorkBuddy 与 Qoder 每日自动签到工具。
+带 **Web 控制台** 的 TRAE（Trae CN / TRAE SOLO CN / 网页版）、WorkBuddy（国内版 / 国际版）、Qoder 与 CodeArts Agent 每日自动签到工具。
 
 - Web 控制台：浏览器内导入账户、查看登录状态、查看积分与签到历史、手动签到、修改调度
-- 多账户：任意数量的 TRAE / WorkBuddy / Qoder 账户，界面化管理
+- 多账户：任意数量的 TRAE / WorkBuddy / Qoder / CodeArts 账户，界面化管理
 - Docker 常驻：容器内置每日定时调度，配置修改即时生效，自动重启
 - 官方接口直连：不模拟点击、不开浏览器
 
@@ -21,9 +21,11 @@
 > **请勿手工编造设备号**。同一台电脑登录多个 TRAE 账户时共用一个真实设备号，同一天只有先领的账户
 > 能拿到积分（平台限制）；分散到不同电脑即可各自领取。控制台账户表会显示设备号尾号。
 
-WorkBuddy：粘贴客户端 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` 文件内容导入；token 过期后重开客户端再导入（官方无续期接口）。
+WorkBuddy：粘贴客户端 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` 文件内容导入；token 过期后重开客户端再导入（官方无续期接口）。国内版（codebuddy.cn）与国际版（workbuddy.ai）按凭据域名自动区分，账户列表分别显示「WorkBuddy」/「WorkBuddy国际版」。
 
 Qoder：在装有 Qoder 客户端的电脑上运行 `python tools\extract_qoder_credentials.py`（自动解密本机登录态、生成机器指纹、探测 API 域名），把输出的 JSON 粘贴到 Web 控制台「Qoder」标签页导入。token 过期可用刷新令牌自动续期（免维护）；中国版账户（qoder.com.cn）导入时会一并保存机器指纹，若日后提示风控拦截 / 活动列表为空，重新运行提取工具更新指纹即可。
+
+CodeArts Agent：在装有华为云 CodeArts Agent（码道）客户端的电脑上运行 `python tools\extract_codearts_credentials.py`，把输出的 JSON 粘贴到控制台「CodeArts」标签页导入；每日签到领取免费积分，STS 凭据按客户端同机制自动续期。以上三个平台连同 TRAE / WorkBuddy 的全部登录态，也可用「一键同步启动器」一次性导入（见下文）。
 
 ## 快速开始（Docker）
 
@@ -43,9 +45,17 @@ docker compose up -d --build
 
 ## 一键同步本机凭据（BAT）
 
-在装有 Trae / WorkBuddy 客户端的电脑上，**双击 `NAS运维工具\同步登录信息到NAS\同步登录信息到NAS.bat`**：
+> **最省事的方式**：浏览器打开 NAS 上的签到控制台 →「添加账户」页 → 点
+> **「⬇ 下载一键同步启动器（.bat）」**。下载到的启动器**已内嵌当前服务地址**
+> （自动取浏览器地址栏，任意 Docker 端口/主机名都自适应）与同步授权令牌，拷到
+> 客户端电脑双击即可完成提取 + 上传，**全程免输入**——不用手填 NAS 地址、不用
+> 预先安装 Python 依赖（启动器会自己定位 Python、按需装包、从服务端拉取最新
+> 提取脚本）。服务端设了 `WEB_PASSWORD` 时令牌 30 分钟有效；改密码即自动作废
+> 旧令牌，到控制台重新下载即可。
 
-- 自动提取本机 Trae CN / TRAE SOLO CN / WorkBuddy 登录态（只读）
+在没有浏览器/不方便访问控制台的电脑上，用仓库自带的交互式脚本：**双击 `NAS运维工具\同步登录信息到NAS\同步登录信息到NAS.bat`**：
+
+- 自动提取本机 Trae CN / TRAE SOLO CN / WorkBuddy / Qoder / CodeArts 登录态（只读）
 - 自动上传到 NAS 上的签到服务并验证（交互式询问服务地址，答案记在 `sync.conf`）
 - 同账号多客户端自动去重（按 user_id，保留登录态最新的一份）
 - 已导入的账户重复运行会自动刷新凭据
@@ -71,7 +81,7 @@ python -m checkin --once   # 单次执行后退出（可配合系统计划任务
 
 - **账户页**：登录状态、当前积分、今日签到结果；单账户签到 / 状态刷新 / 删除
   - 「积分余额」下挂**最早到期批次**小字：TRAE / WorkBuddy 精确到每个积分包（官方接口带过期时间），Qoder 取「套餐周期结束」与「签到批次到期」中更早者（签到批次的到期时刻由领取响应原值留档，无该字段的旧记录按 +30 天近似并标注「估」）。7 天内到期标橙色提醒
-- **添加账户**：TRAE 网页 Cookie 导入（自动验证并抓取用户名）/ TRAE 客户端凭据导入 / WorkBuddy .info 导入
+- **添加账户**：TRAE 网页 Cookie 导入（自动验证并抓取用户名）/ TRAE 客户端凭据导入 / WorkBuddy .info 导入 / Qoder JSON 导入 / CodeArts JSON 导入；「下载一键同步启动器（.bat）」一次导入全部平台
 - **签到历史**：按天查看每次签到结果与积分变动（保留 180 天）
 - **软件版本**：顶栏显示版本号（`Ver.年月日时分`，取打包时刻），点击查看「更新详情」（每次发布的变更记录，来源 `checkin/version.py`）
 - **设置**：签到时间、时区、启动即签；保存即时生效
@@ -84,16 +94,20 @@ python -m checkin --once   # 单次执行后退出（可配合系统计划任务
 │   ├── web.py                   # FastAPI 控制台 API
 │   ├── store.py                 # 配置/账户/历史持久化（data/config.yaml + history.json）
 │   ├── traeweb.py               # TRAE 网页版会话认证（Cookie → JWT）
+│   ├── traedevice.py            # TRAE 客户端真实设备号提取
 │   ├── version.py               # 软件版本号（Ver.年月日时分）+ 更新详情
 │   ├── runner.py / scheduler.py # 签到执行与每日调度
+│   ├── sync_tool/               # 随服务端分发的本机提取脚本包（启动器下载）
 │   └── platforms/
 │       ├── trae.py              # TRAE 签到（client / web 双模式，token 自动续期）
-│       ├── workbuddy.py         # WorkBuddy 签到（含今日礼包尽力领取）
-│       └── qoder.py             # Qoder 签到（Campaign 每日活动，dt/drt 令牌自动续期）
+│       ├── workbuddy.py         # WorkBuddy 签到（国内/国际双主机，含今日礼包）
+│       ├── qoder.py             # Qoder 签到（Campaign 每日活动，dt/drt 令牌自动续期）
+│       └── codearts.py          # CodeArts Agent 签到（免费积分，STS 自动续期）
 ├── static/index.html            # Web 控制台前端（单文件，无构建）
 ├── tools/
 │   ├── diagnose_workbuddy.py    # WorkBuddy 接口自检（排查 401 / 400 用）
 │   ├── extract_qoder_credentials.py  # Qoder 登录态提取 + 机器指纹生成（Windows 本机运行）
+│   ├── extract_codearts_credentials.py  # CodeArts 登录态提取（Windows 本机运行）
 │   ├── ui_check.js              # 前端渲染自检（Node，无需浏览器）
 │   └── aoci/                    # AOCI 代码认知层（AI 代理的仓库上下文，与签到功能无关）
 │       ├── bin/aoci.exe         # 官方 Release 二进制（已校验 SHA256）
