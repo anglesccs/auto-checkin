@@ -28,8 +28,11 @@
 #     refresh_token: "..."
 #     expires_at: "2026-10-01T08:00:00Z"
 #     user_id: "12345678"
-#     device_id: "..."
-#     machine_id: "..."
+#     client_id: "ono9krqynydwx5"   # 刷新令牌所属客户端（Trae IDE；TRAE SOLO 为 en1oxy7wnw8j9n），
+#                                   # 留空则刷新时自动识别
+#     device_id: "1234567890123456" # 设备号：需为客户端真实签发（同步脚本自动携带，勿手编）；
+#     machine_id: "..."             # 生成/编造的号领取时会被业务码 9074 拒收；
+#                                   # 多账户共用同一设备号会触发 9095「同一设备每天只能签到一个账号」
 #     req_source: 1
 #
 #   # WorkBuddy（Web 界面粘贴 .info 文件内容导入；token 过期需重新导入）
@@ -39,3 +42,45 @@
 #     uid: "用户 uid"
 #     domain: ""
 #     expires_at: 1758000000000
+#
+#   # Qoder（tools/extract_qoder_credentials.py 导出 JSON，Web 界面粘贴导入；
+#   # refresh_token 可自动续期；openapi_base 由导入时自动探测）
+#   - name: qoder-1
+#     platform: qoder
+#     token: "dt-..."            # 设备令牌
+#     refresh_token: "drt-..."   # 刷新令牌（自动续期用）
+#     expires_at: "2026-10-28T12:25:52Z"
+#     openapi_base: "https://openapi.qoder.sh"   # 国际版；中国版为 openapi.qoder.com.cn
+#     user_id: "019e..."
+#     username: "昵称"
+#     # 中国版账户额外需要机器指纹（国际版可省略）：
+#     machine_token: "..."
+#     machine_code: "..."
+#     machine_type: "..."
+  #     machine_id: "..."
+  #     machine_os: "windows"
+  #
+  #   # CodeArts Agent（华为云码道；tools/extract_codearts_credentials.py 导出 JSON，
+  #   # Web 界面粘贴导入；STS 凭据约 1 小时过期，refresh_token 可自动续期）
+  #   - name: codearts-1
+  #     platform: codearts
+  #     access_key: "HSTA..."           # STS AccessKeyId
+  #     secret_key: "..."               # STS SecretAccessKey
+  #     security_token: "..."           # STS SecurityToken（约 1 小时过期）
+  #     expires_at: "2026-10-11T11:51:00.503Z"
+  #     refresh_token: "eyJ0eXA..."     # JWT 刷新令牌（一次性旋转，自动续期用）
+  #     code_verifier: "..."            # PKCE code_verifier
+  #     dpop_private_key:               # EC P-256 私钥 JWK
+  #       kty: "EC"
+  #       crv: "P-256"
+  #       x: "..."
+  #       y: "..."
+  #       d: "..."
+  #     dpop_public_key:                # EC P-256 公钥 JWK
+  #       kty: "EC"
+  #       crv: "P-256"
+  #       x: "..."
+  #       y: "..."
+  #     domain_id: "..."
+  #     account_id: "..."
+  #     username: "昵称"

@@ -1,18 +1,26 @@
 @echo off
+rem [v5 fix: relaunch self so cp65001 is active BEFORE any non-ASCII line is parsed.
+rem  chcp mid-file makes cmd mis-track byte offsets at multibyte chars and execute
+rem  random line fragments as commands. The stub lines below are pure ASCII.]
+if "%~1"=="__cp" goto __cp_go
 chcp 65001>nul
+cmd /d /c ""%~f0" __cp %*"
+exit /b %errorlevel%
+:__cp_go
+shift
 set "PYTHONUTF8=1"
 rem ============================================================
 rem  安装登录态同步 bat 所需的 Python 模块
 rem  （requests / PyYAML / pycryptodome）。双击运行一次即可。
-rem  需要联网。   [deps launcher v3 : CRLF+UTF8]
+rem  需要联网。   [deps launcher v4 : CRLF+UTF8]
 rem ============================================================
-title 安装同步依赖   [deps launcher v3 : CRLF+UTF8]
+title 安装同步依赖   [deps launcher v4 : CRLF+UTF8]
 setlocal
 set "HERE=%~dp0"
 cd /d "%HERE%"
 
 echo ============================================================
-echo   安装同步依赖     [deps launcher v3 : CRLF+UTF8]
+echo   安装同步依赖     [deps launcher v4 : CRLF+UTF8]
 echo ============================================================
 echo.
 echo   模块: requests, PyYAML, pycryptodome

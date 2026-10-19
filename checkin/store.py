@@ -14,10 +14,12 @@ import yaml
 DEFAULT_SCHEDULE = "08:30"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 
-VALID_PLATFORMS = {"trae", "workbuddy"}
+VALID_PLATFORMS = {"trae", "workbuddy", "qoder", "codearts"}
 REQUIRED_FIELDS = {
     "trae": ["token"],  # client 模式必填；web 模式必填 cookie（见 validate_account）
     "workbuddy": ["token", "uid"],
+    "qoder": ["token"],  # dt- 设备令牌；refresh_token（drt-）强烈建议填写
+    "codearts": ["access_key", "secret_key"],  # STS 凭据；refresh_token 可自动续期
 }
 HISTORY_MAX_AGE_DAYS = 180
 
@@ -109,10 +111,41 @@ class Store:
             name = incoming_name
             if not name:
                 name = f"{platform}-{len(accounts) + 1}"
-            # 同名覆盖：同一账户重新导入（换电脑 / 重新登录）时刷新凭据
-            exists = next((i for i, a in enumerate(accounts) if a.get("name") == name), None)
+
+            # 匹配要刷新的既有账户。判定「是不是同一个账号」看登录身份（user_id/uid），
+            # 不能只看名字——曾因同名盲覆盖导致同步脚本用客户端名把别人的账户顶掉。
+            #   1) 先按 平台+身份 匹配：同一账号无论现在叫什么名字，都刷新同一条；
+            #   2) 匹配不到再按名字找：同平台且身份一致（或一方缺身份信息）→ 覆盖刷新；
+            #   3) 同名但身份不同 / 平台不同 → 是另一个账号，绝不静默顶替，
+            #      自动改名为 <原名>-2、-3… 新增一条。
+            new_id = self._identity(acc)
+            exists = None
+            if new_id:
+                exists = next(
+                    (i for i, a in enumerate(accounts)
+                     if a.get("platform") == platform and self._identity(a) == new_id),
+                    None,
+                )
             if exists is None:
-                # 完全相同的凭据（同 token）视为重复导入，直接拒绝，避免凭空多出一个账户
+                idx = next((i for i, a in enumerate(accounts) if a.get("name") == name), None)
+                if idx is not None:
+                    if self._same_account(accounts[idx], acc, platform):
+                        exists = idx
+                    else:
+                        name = self._unique_name(name, accounts)
+            if exists is not None:
+                # 匹配到既有账户：沿用其现有名称，避免把用户自定义名冲掉、也避免撞名
+                name = str(accounts[exists].get("name") or name)
+                # 设备指纹由本服务生成并管理：重新导入凭据时保留，
+                # 否则每次同步都会换设备号（TRAE 按设备限制每日签到次数）
+                for key in ("device_id", "machine_id", "client_id"):
+                    if not acc.get(key) and accounts[exists].get(key):
+                        acc[key] = accounts[exists][key]
+                # 用户手动填写的备注不在同步/导入的凭据里，刷新时不能被冲掉
+                if not str(acc.get("remark") or "").strip() and accounts[exists].get("remark"):
+                    acc["remark"] = accounts[exists]["remark"]
+            else:
+                # 全新账户：完全相同的凭据（同 token）视为重复导入，直接拒绝
                 same_token = [
                     a for a in accounts
                     if a.get("platform") == platform and a.get("token") and a.get("token") == acc.get("token")
@@ -129,6 +162,31 @@ class Store:
             data["accounts"] = accounts
             self._write(data)
             return acc
+
+    @staticmethod
+    def _identity(acc: dict) -> str:
+        """账户的登录身份标识：trae / qoder 用 user_id，workbuddy 用 uid"""
+        return str(acc.get("user_id") or acc.get("uid") or "").strip()
+
+    def _same_account(self, old: dict, new: dict, platform: str) -> bool:
+        """同名账户是否允许覆盖：仅同平台且同一登录身份时才允许"""
+        if str(old.get("platform") or "").strip().lower() != platform:
+            return False
+        old_id, new_id = self._identity(old), self._identity(new)
+        if not old_id or not new_id:
+            # 老数据（早期导入）可能没有 user_id/uid：保留原有「重导入刷新凭据」行为
+            return True
+        return old_id == new_id
+
+    @staticmethod
+    def _unique_name(base: str, accounts: list) -> str:
+        taken = {str(a.get("name") or "") for a in accounts}
+        if base not in taken:
+            return base
+        i = 2
+        while f"{base}-{i}" in taken:
+            i += 1
+        return f"{base}-{i}"
 
     def _validate(self, acc: dict, accounts: list) -> dict:
         platform = acc["platform"]
@@ -174,6 +232,24 @@ class Store:
                     accounts[i] = acc
                     data["accounts"] = accounts
                     self._write(data)
+                return acc
+            return None
+
+    def set_account_remark(self, name: str, remark: str) -> dict | None:
+        """设置账户备注；传空字符串表示清除（与 patch_account 的「空值跳过」不同）"""
+        with self._lock:
+            data = self._read()
+            accounts = list(data.get("accounts") or [])
+            for acc in accounts:
+                if acc.get("name") != name:
+                    continue
+                remark = str(remark or "").strip()
+                if remark:
+                    acc["remark"] = remark
+                else:
+                    acc.pop("remark", None)
+                data["accounts"] = accounts
+                self._write(data)
                 return acc
             return None
 

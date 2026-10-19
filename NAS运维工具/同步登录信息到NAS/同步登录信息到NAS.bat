@@ -1,7 +1,27 @@
 @echo off
+rem [v6 admin gate: WorkBuddy 2026-09+ protects its own process memory, so
+rem  reading the at-rest key (to decrypt its encrypted tokens) needs admin.
+rem  If not elevated, relaunch self via UAC. ASCII-only region: runs before chcp.]
+fltmc >nul 2>&1
+if not errorlevel 1 goto __admin_ok
+echo Requesting administrator rights (UAC prompt) - needed to decrypt
+echo WorkBuddy encrypted tokens (the client protects its process memory).
+powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs | Out-Null } catch { exit 1223 }"
+if errorlevel 1 echo [CANCEL] Admin rights not granted - cannot decrypt WorkBuddy tokens without them.
+timeout /t 5 >nul
+exit /b %errorlevel%
+:__admin_ok
+rem [v5 fix: relaunch self so cp65001 is active BEFORE any non-ASCII line is parsed.
+rem  chcp mid-file makes cmd mis-track byte offsets at multibyte chars and execute
+rem  random line fragments as commands. The stub lines below are pure ASCII.]
+if "%~1"=="__cp" goto __cp_go
 chcp 65001>nul
+cmd /d /c ""%~f0" __cp %*"
+exit /b %errorlevel%
+:__cp_go
+shift
 rem ============================================================
-rem  把本机的 Trae CN / TRAE SOLO CN / WorkBuddy 登录态
+rem  把本机的 Trae CN / TRAE SOLO CN / WorkBuddy / Qoder 登录态
 rem  同步到远端 auto-checkin 服务。双击运行。
 rem
 rem  不内置主机: 运行时输入 NAS 地址（会记住在 sync.conf）。
@@ -13,9 +33,9 @@ rem  依赖  : Python 3.9+ 及 requests / PyYAML / pycryptodome
 rem          （先双击本文件夹里的 install-deps.bat 装一次）
 rem          WorkBuddy 客户端必须正在运行，因为它的 token
 rem          用只存在于客户端进程内存里的密钥加密。
-rem  [sync launcher v4 : CRLF+UTF8]
+rem  [sync launcher v5 : CRLF+UTF8]
 rem ============================================================
-title 同步登录信息到 NAS   [sync launcher v4 : CRLF+UTF8]
+title 同步登录信息到 NAS   [sync launcher v5 : CRLF+UTF8]
 setlocal
 set "HERE=%~dp0"
 cd /d "%HERE%"
@@ -39,15 +59,15 @@ if not "%~3"=="" set "WEB_PASS=%~3"
 
 cls
 echo ============================================================
-echo   同步登录信息到 NAS        [sync launcher v4 : CRLF+UTF8]
+echo   同步登录信息到 NAS        [sync launcher v5 : CRLF+UTF8]
 echo ============================================================
 echo.
 echo   直接回车 = 采用 [方括号] 里的默认值。
 echo.
 echo   运行前确认:
-echo     - 本机的 Trae / WorkBuddy 客户端已登录
+echo     - 本机的 Trae / WorkBuddy / Qoder 客户端已登录
 echo     - WorkBuddy 客户端正在运行（token 是加密的）
-echo   预计耗时: 约 10 秒。成功标志: 每个账户都显示导入成功，
+echo   预计耗时: 约 10-30 秒。成功标志: 每个账户都显示导入成功，
 echo   结尾计数是 N/N。
 echo ------------------------------------------------------------
 echo.
@@ -120,7 +140,8 @@ echo.
 echo [WARN] 脚本退出码 %RC%，部分账户可能没有导入成功。
 echo        请阅读上面的日志。常见原因:
 echo          - WorkBuddy 客户端没在运行，加密 token 无法解密
-echo          - 本机从未登录过 Trae / WorkBuddy
+echo          - 本机从未登录过 Trae / WorkBuddy / Qoder
+echo          - Qoder 未安装或指纹生成失败（中国版账户需要）
 echo          - 服务地址不可达: %SERVER%
 goto end
 

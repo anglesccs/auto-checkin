@@ -20,9 +20,12 @@ r"""WorkBuddy 签到接口一键诊断（在本机运行，直连官方接口，
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+# 提取库在「NAS运维工具/同步登录信息到NAS/」下（2026-09-28 项目去重后 tools/ 不再保留副本）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent
+                       / "NAS运维工具" / "同步登录信息到NAS"))
 import extract_credentials as ext  # noqa: E402
 
 import requests  # noqa: E402
@@ -30,6 +33,9 @@ import requests  # noqa: E402
 API_BASE = "https://copilot.tencent.com/v2/billing/meter"
 # 实时余额接口：网关路由不带 /v2，且必须带非默认 User-Agent（否则 403 code 10085）
 BALANCE_URL = "https://copilot.tencent.com/billing/meter/get-user-resource-summary"
+# 资源包明细（含每个包的到期时间）：同样不带 /v2，且 PackageCodes 必填
+PAID_PACKAGES_URL = "https://copilot.tencent.com/billing/meter/get-user-resource-paid-packages"
+FREE_PACKAGES_URL = "https://copilot.tencent.com/billing/meter/get-user-resource-free-packages"
 # 账号昵称接口
 PROFILE_URL = "https://copilot.tencent.com/v2/accounts"
 USER_AGENT = "WorkBuddy/1.0"
@@ -42,6 +48,21 @@ def call(headers: dict, path: str) -> tuple:
         return resp.status_code, resp.json(), resp.text
     except ValueError:
         return resp.status_code, None, resp.text
+
+
+def resource_detail(headers: dict, url: str, codes: list, extra: dict) -> list:
+    """分页拉取资源包明细（与客户端 fetchAllPages 一致：每页 200、最多 10 页）"""
+    got: list = []
+    for page in range(1, 11):
+        payload = {"PageNumber": page, "PageSize": 200, "PackageCodes": codes,
+                   "Status": [0, 3], **extra}
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        data = (resp.json() or {}).get("data") or {}
+        batch = data.get("Accounts") or []
+        got += batch
+        if len(batch) < 200 or len(got) >= int(data.get("TotalCount") or 0):
+            break
+    return got
 
 
 def main() -> int:
@@ -80,17 +101,49 @@ def main() -> int:
         print()
 
     # 实时积分余额（客户端余额栏同源）
+    summary_packages: list = []
     try:
         r = requests.post(BALANCE_URL, headers=headers, json={}, timeout=20)
         body = r.json()
-        packages = (body.get("data") or {}).get("Packages") or []
-        left = sum(float(p.get("CycleRemainCapacity") or 0) for p in packages)
-        total = sum(float(p.get("CycleTotalCapacity") or 0) for p in packages)
+        summary_packages = (body.get("data") or {}).get("Packages") or []
+        left = sum(float(p.get("CycleRemainCapacity") or 0) for p in summary_packages)
+        total = sum(float(p.get("CycleTotalCapacity") or 0) for p in summary_packages)
         print(f"POST get-user-resource-summary  ->  HTTP {r.status_code}")
-        print(f"   实时余额：{round(left, 2)} / 总额 {round(total, 2)}（{len(packages)} 个资源包）")
+        print(f"   实时余额：{round(left, 2)} / 总额 {round(total, 2)}"
+              f"（{len(summary_packages)} 个资源包）")
         print()
     except (requests.RequestException, ValueError) as e:
         print(f"实时余额查询失败：{e}\n")
+
+    # 积分到期明细（控制台「积分余额」下「最早到期」小字同源，口径见 checkin/platforms/workbuddy.py）
+    today = datetime.now().strftime("%Y-%m-%d")
+    codes = sorted({str(p.get("PackageCode") or "") for p in summary_packages} - {""})
+    live: list = []  # (到期毫秒, 包名, 剩余, 商品码)
+    for label, url, extra in (
+        ("付费包", PAID_PACKAGES_URL, {"NeedRenewInfo": True}),
+        ("免费包", FREE_PACKAGES_URL, {"SlicePeriodStartTime": f"{today} 00:00:00",
+                                       "SlicePeriodEndTime": f"{today} 23:59:59"}),
+    ):
+        if not codes:
+            break
+        try:
+            for pack in resource_detail(headers, url, codes, extra):
+                remain = float(pack.get("CycleCapacityRemainPrecise") or 0)
+                ts = pack.get("DeductionEndTime")
+                if remain > 0 and ts:
+                    live.append((int(ts), str(pack.get("PackageName") or ""),
+                                 remain, str(pack.get("PackageCode") or "")))
+        except (requests.RequestException, ValueError, TypeError) as e:
+            print(f"{label}明细查询失败：{e}\n")
+    if live:
+        live.sort()
+        print(f"资源包到期明细（{len(live)} 个包有剩余；时间按本机时区）")
+        for ts, pname, remain, code in live:
+            when = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"   到期 {when}  剩 {round(remain, 2)}  {pname}（{code}）")
+        earliest = datetime.fromtimestamp(live[0][0] / 1000).strftime("%Y/%m/%d %H:%M:%S")
+        print(f"   最早到期：{earliest}（控制台「积分余额」下方显示，7 天内转橙色）")
+        print()
 
     # 用户昵称（控制台「用户」列同源）
     try:

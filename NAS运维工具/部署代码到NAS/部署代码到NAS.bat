@@ -1,5 +1,13 @@
 @echo off
+rem [v5 fix: relaunch self so cp65001 is active BEFORE any non-ASCII line is parsed.
+rem  chcp mid-file makes cmd mis-track byte offsets at multibyte chars and execute
+rem  random line fragments as commands. The stub lines below are pure ASCII.]
+if "%~1"=="__cp" goto __cp_go
 chcp 65001>nul
+cmd /d /c ""%~f0" __cp %*"
+exit /b %errorlevel%
+:__cp_go
+shift
 rem ============================================================
 rem  把本机 auto-checkin 代码部署到飞牛 NAS 并重建 docker 镜像。
 rem  双击运行。

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .logger import setup_logger
 from .store import Store
+from .version import VERSION
 
 
 def main() -> int:
@@ -59,7 +60,7 @@ def main() -> int:
 
     host = os.environ.get("CHECKIN_WEB_HOST", "0.0.0.0")
     port = int(os.environ.get("CHECKIN_WEB_PORT", "8080"))
-    logger.info(f"Web 控制台：http://{host}:{port}  （数据目录：{args.data_dir}）")
+    logger.info(f"自动签到 {VERSION} —— Web 控制台：http://{host}:{port}  （数据目录：{args.data_dir}）")
     uvicorn.run(app, host=host, port=port, log_level="warning")
     sched.stop()
     return 0

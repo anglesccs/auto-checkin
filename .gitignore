@@ -28,3 +28,14 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# AOCI agent host integration (machine-bound; do not commit)
+.mcp.json
+.mcp.json.backup.*
+.aoci/
+.merkle-snapshot.json
+tools/aoci/
+
+# ---------- 本地虚拟环境 ----------
+Lib/
+Scripts/

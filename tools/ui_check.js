@@ -69,6 +69,13 @@ const sandbox = {
     const u = String(url);
     calls.push([u, (opts && opts.method) || "GET", (opts && opts.body) || ""]);
     if (u.startsWith("/api/state")) return { status: 200, ok: true, json: async () => stateData };
+    if (u.startsWith("/api/version")) {
+      const v = stateData.version || "Ver.000000000000";
+      return { status: 200, ok: true, json: async () => ({
+        version: v,
+        changelog: [{ version: v, date: "2026-09-30 02:22", changes: ["控制台新增软件版本号与更新详情"] }],
+      }) };
+    }
     if (u.startsWith("/api/history/reset")) {
       return { status: 200, ok: true, json: async () => ({ ok: true, removed: 3, group: "x" }) };
     }
@@ -233,6 +240,19 @@ const check = (label, cond, extra) => {
     .filter((i) => i >= 0);
   check("历史页账户下拉顺序与账户表一致",
     dropdownOrder.every((v, i) => i === 0 || dropdownOrder[i - 1] <= v), JSON.stringify(dropdownOrder));
+
+  // ---------- 8. 软件版本 / 更新详情 ----------
+  console.log("\n[软件版本]");
+  check("顶栏版本号取自 /api/state 的 version",
+    els["app-version"].textContent === (stateData.version || "--"), els["app-version"].textContent);
+  run("__cl__ = showChangelog();");
+  await run("__cl__");
+  const clHtml = els["changelog-body"].innerHTML;
+  check("点击版本号拉取 /api/version", calls.some((c) => c[0] === "/api/version"));
+  check("更新详情含当前版本号", clHtml.includes(String(stateData.version || "Ver.")));
+  check("更新详情渲染了条目", clHtml.includes("<li>") && clHtml.includes("更新详情"));
+  run("closeChangelog();");
+  check("关闭后弹层隐藏", els["changelog-overlay"].classList.contains("hidden"));
 
   console.log(fail ? `\n${fail} 项未通过` : "\n全部通过");
   process.exit(fail ? 1 : 0);

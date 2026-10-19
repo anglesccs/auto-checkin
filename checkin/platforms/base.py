@@ -23,12 +23,17 @@ class CheckinResult:
     - claimed=True：本次调用领取接口成功，credits 是本次实际到账的积分；
     - claimed=False：今天之前已签到（或活动未开放），本次没有新增积分，
       此时 credits 必须为 None —— 否则历史统计会把同一天的积分重复累加。
+
+    credits_expires_at：本次领取批次的积分到期时刻（epoch 秒），
+    仅当平台接口直接给出时填写（如 Qoder 领取响应的 expiresAt）；
+    没有该字段的平台留 None，由到期检测按各自口径计算。
     """
 
     ok: bool
     message: str
     credits: int | None = None
     claimed: bool = False
+    credits_expires_at: float | None = None
 
 
 def request_with_retry(
@@ -57,6 +62,9 @@ class PlatformBase(ABC):
     def __init__(self, account: dict):
         self.account = account
         self.name = str(account.get("name") or self.platform)
+
+    def prepare(self, store=None) -> None:
+        """签到 / 状态查询前的准备（补默认值、写回配置等），默认无操作"""
 
     @abstractmethod
     def checkin(self) -> CheckinResult:

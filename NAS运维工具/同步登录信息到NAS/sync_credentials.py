@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把本机的 Trae CN / TRAE SOLO CN / WorkBuddy 登录凭据同步到远程自动签到服务（NAS Docker）
+"""把本机的 Trae CN / TRAE SOLO CN / WorkBuddy / Qoder 登录凭据同步到远程自动签到服务（NAS Docker）
 
 用法（推荐双击本文件夹的 同步登录信息到NAS.bat）：
     python sync_credentials.py [服务地址]
@@ -22,6 +22,16 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 import extract_credentials as ext  # noqa: E402
+
+try:
+    import extract_qoder_credentials as qext  # noqa: E402
+except ImportError:  # 旧部署包可能没有该文件：只跳过 Qoder，不影响其他平台
+    qext = None
+
+try:
+    import extract_codearts_credentials as caext  # noqa: E402
+except ImportError:  # 旧部署包可能没有该文件：只跳过 CodeArts，不影响其他平台
+    caext = None
 
 import requests  # noqa: E402
 
@@ -79,7 +89,12 @@ def wb_name(stem: str, uid: str) -> str:
 def collect_workbuddy() -> list:
     """提取 WorkBuddy 凭据。新版客户端会把 token 加密存储（$wbEncrypted），
     若 WorkBuddy 正在运行则通过其内存中的安装密钥解密后上传；
-    同一账号（uid 相同）只保留有效期最长的一份。"""
+    同一账号（uid 相同）只保留**最新登录态**的一份。
+
+    择新依据是「客户端最近刷新时间」而非 expires_at：客户端重新登录/刷新会签发新会话，
+    旧会话的 expires_at 可能反而更晚（实测 www.codebuddy.cn 的失效旧会话比
+    copilot.tencent.com 的新会话晚约 4.7 小时），沿用旧 token 会让签到一直 HTTP 401。
+    """
     by_uid = {}
 
     def expiry(entry):
@@ -87,6 +102,19 @@ def collect_workbuddy() -> list:
         if "raw" in payload:
             return to_epoch((payload["raw"].get("auth") or {}).get("expiresAt"))
         return to_epoch(payload.get("expires_at"))
+
+    def freshness(raw, path) -> float:
+        """客户端最近刷新时间（毫秒）；缺失时退回文件修改时间（同量纲）"""
+        try:
+            ts = float((raw.get("auth") or {}).get("lastRefreshTime") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts:
+            return ts
+        try:
+            return path.stat().st_mtime * 1000
+        except OSError:
+            return 0.0
 
     for d in ext.workbuddy_auth_dirs():
         for path in sorted(d.glob("*.info")):
@@ -120,12 +148,67 @@ def collect_workbuddy() -> list:
             else:
                 entry = {"name": wb_name(path.stem, uid),
                          "payload": {"name": wb_name(path.stem, uid), "raw": raw}}
+            key = (freshness(raw, path), expiry(entry))
             prev = by_uid.get(uid)
-            if prev is None or expiry(entry) > expiry(prev):
-                by_uid[uid] = entry
+            if prev is None or key > prev[0]:
+                by_uid[uid] = (key, entry)
             else:
-                log(f"跳过 [{path.stem}]：与 [{prev['name']}] 是同一账号（uid 相同），保留有效期更长的一份")
-    return list(by_uid.values())
+                log(f"跳过 [{path.stem}]：与 [{prev[1]['name']}] 是同一账号（uid 相同），"
+                    f"保留最近刷新的登录态")
+    return [entry for _, entry in by_uid.values()]
+
+
+def qoder_name(payload: dict) -> str:
+    """账户名：优先官方昵称，退化用 user_id 前 8 位。同名重复导入会原地刷新凭据。"""
+    nick = str((payload.get("user") or {}).get("name") or "").strip()
+    uid = str((payload.get("user") or {}).get("id") or "")
+    return f"qoder-{nick or uid[:8] or 'account'}"
+
+
+def collect_qoder() -> list:
+    """提取 Qoder 登录态（新版 auth.v1.dat / 旧版 state.vscdb + 机器指纹 + 域名探测）"""
+    if qext is None:
+        log("跳过 Qoder：缺少 extract_qoder_credentials.py（请更新同步工具文件夹）")
+        return []
+    try:
+        payload = qext.collect(log=log)
+    except Exception as e:
+        log(f"Qoder 提取异常：{e}")
+        return []
+    if payload is None:
+        log("未找到本机 Qoder 登录态（未安装或未登录，属正常）")
+        return []
+    return [{"name": qoder_name(payload), "payload": payload}]
+
+
+def codearts_name(payload: dict) -> str:
+    """账户名：优先用户名，退化用 account_id 前 8 位。"""
+    nick = str(payload.get("username") or "").strip()
+    uid = str(payload.get("account_id") or "")
+    return f"codearts-{nick or uid[:8] or 'account'}"
+
+
+def collect_codearts() -> list:
+    """提取 CodeArts Agent 登录态（state.vscdb + DPAPI + AES-GCM 解密）"""
+    if caext is None:
+        log("跳过 CodeArts：缺少 extract_codearts_credentials.py（请更新同步工具文件夹）")
+        return []
+    try:
+        payload = caext.collect(log=log)
+    except Exception as e:
+        log(f"CodeArts 提取异常：{e}")
+        return []
+    if payload is None:
+        log("未找到本机 CodeArts Agent 登录态（未安装或未登录，属正常）")
+        return []
+    return [{"name": codearts_name(payload), "payload": payload}]
+
+
+def _note_renamed(resp: dict, pushed_name: str) -> None:
+    """服务端若因同名不同账号自动改名（如 Trae CN -> Trae CN-2），在日志里明确提示"""
+    final = str((resp.get("account") or {}).get("name") or "")
+    if final and pushed_name and final != pushed_name:
+        log(f"  -> 注意：远端已存在同名但不同账号的账户，本账户保存为 [{final}]")
 
 
 def is_lan(base: str) -> bool:
@@ -184,19 +267,27 @@ def main() -> int:
     trae = collect_trae()
     log("正在提取本机 WorkBuddy 客户端登录态 ...")
     workbuddy = collect_workbuddy()
+    log("正在提取本机 Qoder 客户端登录态 ...")
+    qoder = collect_qoder()
+    log("正在提取本机 CodeArts Agent 客户端登录态 ...")
+    codearts = collect_codearts()
 
-    if not trae and not workbuddy:
-        print("未在本机找到任何登录态。请先在本机安装并登录 Trae CN / TRAE SOLO CN / WorkBuddy 客户端。")
+    if not trae and not workbuddy and not qoder and not codearts:
+        print("未在本机找到任何登录态。请先在本机安装并登录 Trae CN / TRAE SOLO CN / WorkBuddy / Qoder / CodeArts Agent 客户端。")
         return 1
 
     session = connect_server(base)
 
     ok_count = 0
-    total = len(trae) + len(workbuddy)
+    total = len(trae) + len(workbuddy) + len(qoder) + len(codearts)
 
     for acc in trae:
         name = acc.get("name") or "trae"
         log(f"上传 TRAE 客户端凭据 [{name}]（token={ext.mask(acc.get('token'))}）...")
+        # device_id / machine_id 必须上传：领取接口会校验设备号是客户端真实
+        # 签发的机器标识，伪造号会被业务码 9074（文案伪装成「用户太多」）拒收；
+        # 服务端按登录身份（user_id）匹配既有账户原地刷新，不会重复建户。
+        # client_id 按客户端类型给出，供刷新令牌时使用（SOLO 与 Trae IDE 不同）。
         resp = upload(session, base, "/api/accounts/trae_client", {
             "name": name,
             "token": acc.get("token", ""),
@@ -206,12 +297,14 @@ def main() -> int:
             "host": acc.get("host", ""),
             "device_id": acc.get("device_id", ""),
             "machine_id": acc.get("machine_id", ""),
+            "client_id": "en1oxy7wnw8j9n" if "SOLO" in name.upper() else "ono9krqynydwx5",
             "ide_version": acc.get("ide_version", ""),
             "username": acc.get("username", ""),
         })
         status = resp.get("status") or {}
         if resp.get("ok"):
             ok_count += 1
+            _note_renamed(resp, name)
             if status.get("ok"):
                 who = status.get("nickname") or acc.get("username") or "未知用户"
                 log(f"  -> 导入成功（{who}），登录态有效，当前余额 {status.get('credits')}")
@@ -222,12 +315,55 @@ def main() -> int:
 
     for wb in workbuddy:
         log(f"上传 WorkBuddy 凭据 [{wb['name']}] ...")
-        resp = upload(session, base, "/api/accounts/workbuddy", wb["payload"])
+        payload = wb["payload"]
+        if isinstance(payload.get("raw"), dict):
+            # 服务端把 raw 当 JSON 字符串解析（与网页「粘贴导入」同一格式）；
+            # 直接传 dict 会被 str() 成单引号 repr，服务端 json.loads 必然失败
+            payload = dict(payload)
+            payload["raw"] = json.dumps(payload["raw"], ensure_ascii=False)
+        resp = upload(session, base, "/api/accounts/workbuddy", payload)
         status = resp.get("status") or {}
         if resp.get("ok"):
             ok_count += 1
+            _note_renamed(resp, wb["name"])
             if status.get("ok"):
                 who = status.get("nickname") or wb["payload"].get("username") or "未知用户"
+                log(f"  -> 导入成功（{who}），登录态有效，当前余额 {status.get('credits')}")
+            else:
+                log(f"  -> 已导入，但状态查询失败：{status.get('message')}")
+        else:
+            log(f"  -> 导入失败：{resp.get('detail') or resp}")
+
+    for qd in qoder:
+        log(f"上传 Qoder 凭据 [{qd['name']}] ...")
+        resp = upload(session, base, "/api/accounts/qoder", {
+            "name": qd["name"],
+            "raw": json.dumps(qd["payload"], ensure_ascii=False),
+        })
+        status = resp.get("status") or {}
+        if resp.get("ok"):
+            ok_count += 1
+            _note_renamed(resp, qd["name"])
+            if status.get("ok"):
+                who = status.get("nickname") or "未知用户"
+                log(f"  -> 导入成功（{who}），登录态有效，当前余额 {status.get('credits')}")
+            else:
+                log(f"  -> 已导入，但状态查询失败：{status.get('message')}")
+        else:
+            log(f"  -> 导入失败：{resp.get('detail') or resp}")
+
+    for ca in codearts:
+        log(f"上传 CodeArts 凭据 [{ca['name']}] ...")
+        resp = upload(session, base, "/api/accounts/codearts", {
+            "name": ca["name"],
+            "raw": json.dumps(ca["payload"], ensure_ascii=False),
+        })
+        status = resp.get("status") or {}
+        if resp.get("ok"):
+            ok_count += 1
+            _note_renamed(resp, ca["name"])
+            if status.get("ok"):
+                who = status.get("nickname") or "未知用户"
                 log(f"  -> 导入成功（{who}），登录态有效，当前余额 {status.get('credits')}")
             else:
                 log(f"  -> 已导入，但状态查询失败：{status.get('message')}")

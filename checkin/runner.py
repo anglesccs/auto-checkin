@@ -2,10 +2,13 @@
 
 import logging
 import threading
+import time
 from datetime import datetime
 
 from .platforms import PLATFORMS
 from .platforms.base import CheckinResult
+from .platforms.qoder import CREDITS_VALIDITY_DAYS
+from .store import HISTORY_MAX_AGE_DAYS
 
 logger = logging.getLogger("checkin")
 
@@ -29,6 +32,7 @@ def _record(store, acc: dict, result: CheckinResult) -> None:
             "ok": result.ok,
             "claimed": bool(result.claimed),
             "credits": credits,
+            "credits_expires_at": result.credits_expires_at,
             "message": result.message,
         }])
     except Exception as e:
@@ -61,6 +65,7 @@ def run_account(acc: dict, store=None) -> CheckinResult:
     """执行单个账户签到"""
     platform = PLATFORMS[acc["platform"]](acc)
     try:
+        platform.prepare(store)
         result = platform.checkin()
     except Exception as e:
         result = CheckinResult(False, f"未捕获异常：{e}")
@@ -114,10 +119,54 @@ def run_by_name(accounts: list, name: str, store=None) -> tuple | None:
     return acc, result
 
 
+def qoder_expiry_from_history(store, acc: dict) -> dict | None:
+    """汇总 Qoder 签到积分的最早到期批次
+
+    每个签到批次 = 一次领取的 Credits（活动接口 benefit.validity 为
+    「领取后 30 天有效」），批次到期时刻随领取结果写入历史记录
+    （credits_expires_at，服务端 expiresAt 原值，estimated=False）；
+    早期没有该字段的旧记录用「领取时间 + 30 天」兜底（estimated=True）。
+    取仍在有效期内的最早批次——历史不完整时可能漏掉更早批次。
+    """
+    try:
+        records = store.read_history(days=HISTORY_MAX_AGE_DAYS)
+    except Exception:
+        return None
+    user_key = str(acc.get("user_id") or acc.get("uid") or acc.get("name") or "")
+    name = str(acc.get("name") or "")
+    now = time.time()
+    earliest = None
+    for r in records:
+        if r.get("platform") != "qoder" or not r.get("ok"):
+            continue
+        if str(r.get("user_key") or "") != user_key and str(r.get("name") or "") != name:
+            continue
+        expiry = r.get("credits_expires_at")
+        if isinstance(expiry, (int, float)) and expiry > 0:
+            ts, estimated = int(expiry), False
+        elif r.get("claimed") and r.get("credits"):
+            try:
+                claimed_ts = float(r.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not claimed_ts:
+                continue
+            ts, estimated = int(claimed_ts + CREDITS_VALIDITY_DAYS * 86400), True
+        else:
+            continue
+        if ts <= now:
+            continue  # 该批次已过期
+        if earliest is None or ts < earliest["ts"]:
+            earliest = {"ts": ts, "credits": r.get("credits"),
+                        "label": "签到奖励", "estimated": estimated}
+    return earliest
+
+
 def query_status(acc: dict, store=None) -> dict:
     """查询账户登录状态与积分（不领取）；顺带把昵称回填到配置"""
     platform = PLATFORMS[acc["platform"]](acc)
     try:
+        platform.prepare(store)
         status = platform.query_status()
     except Exception as e:
         return {"ok": False, "logged_in": False, "checked_in": False,
@@ -129,4 +178,11 @@ def query_status(acc: dict, store=None) -> dict:
                                 avatar_url=status.get("avatar_url") or "")
         except Exception as e:
             logger.warning(f"[{acc.get('name')}] 昵称回填失败：{e}")
+    # Qoder：平台给的是套餐到期（官方值），签到批次到期要用签到历史补算，
+    # 两者取更早者才是「最早到期批次」
+    if status.get("ok") and acc.get("platform") == "qoder" and store is not None:
+        batch = qoder_expiry_from_history(store, acc)
+        current = status.get("expiry")
+        if batch and (not current or batch["ts"] < current["ts"]):
+            status["expiry"] = batch
     return status
