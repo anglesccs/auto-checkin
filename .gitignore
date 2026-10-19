@@ -30,6 +30,7 @@ venv/
 Thumbs.db
 
 # AOCI agent host integration (machine-bound; do not commit)
+.zcode/
 .mcp.json
 .mcp.json.backup.*
 .aoci/
