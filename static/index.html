@@ -285,8 +285,11 @@
     <div id="sub-trae-client" class="hidden">
       <div class="steps">
         <b>通过桌面客户端登录态导入（token + refreshToken 可长期自动续期）</b>
-        <p>推荐直接双击 <code>NAS运维工具\同步登录信息到NAS\同步登录信息到NAS.bat</code> 一键提取并导入
-          （在装有 Trae 客户端的电脑上运行）。手动导入则在客户端电脑上运行
+        <p>推荐用页面顶部的 <b>「⬇ 下载一键同步启动器（.bat）」</b>：内嵌本服务地址与同步授权，
+          拷到装有 Trae 客户端的电脑上双击，即自动提取并导入（无需装依赖、无需手填地址）。
+          控制台不可达时，也可在客户端电脑上双击
+          <code>NAS运维工具\同步登录信息到NAS\同步登录信息到NAS.bat</code>（交互式询问服务地址）完成同样的事。
+          手动导入则在客户端电脑上运行
           <code>NAS运维工具\同步登录信息到NAS\extract_credentials.py</code>，把输出中的字段填到下面。</p>
       </div>
       <div class="form-grid">
@@ -590,7 +593,7 @@ function userCell(a) {
 
 // ---------- 凭据有效期 ----------
 
-const SYNC_HINT = "请运行「同步登录信息到NAS.bat」更新 token";
+const SYNC_HINT = "请到「添加账户」页重新下载一键同步启动器更新 token";
 
 // 单账户有效期单元格
 function expiresCell(a) {
@@ -625,15 +628,15 @@ function renderTokenAlert(accs) {
   if (hard.length) {
     items.push(`<div><b>${hard.length} 个账户的 token 已过期</b>，签到会直接失败：
       <ul>${hard.map(a => `<li>${name(a)}（${platformShort(a.platform)}，有效期至 ${esc(a.expires_label)}）</li>`).join("")}</ul>
-      请在本机双击运行 <code>同步登录信息到NAS.bat</code> 重新提取并上传登录态。</div>`);
+      请到「添加账户」页重新下载一键同步启动器（内嵌本服务地址），在对应电脑上双击更新登录态。</div>`);
   }
   if (soft.length) {
     items.push(`<div>${soft.length} 个账户的 accessToken 已过期，但配置了 refresh_token 可自动续期；
-      若签到持续失败，请运行 <code>同步登录信息到NAS.bat</code> 更新：${soft.map(name).join("、")}</div>`);
+      若签到持续失败，请重新运行一键同步启动器更新：${soft.map(name).join("、")}</div>`);
   }
   if (soon.length) {
-    items.push(`<div>${soon.length} 个账户的 token 将在 7 天内到期，建议提前运行
-      <code>同步登录信息到NAS.bat</code>：${soon.map(a => `${name(a)}（剩余 ${a.expires_in_days} 天）`).join("、")}</div>`);
+    items.push(`<div>${soon.length} 个账户的 token 将在 7 天内到期，建议提前重新下载一键同步启动器更新：
+      ${soon.map(a => `${name(a)}（剩余 ${a.expires_in_days} 天）`).join("、")}</div>`);
   }
   if (!items.length) { box.classList.add("hidden"); box.innerHTML = ""; return; }
   box.className = "alert " + (hard.length ? "alert-err" : "alert-warn");
